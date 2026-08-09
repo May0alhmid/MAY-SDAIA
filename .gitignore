@@ -1,0 +1,14 @@
+# secrets
+.env
+
+# uv / python
+.venv/
+__pycache__/
+*.pyc
+
+# jupyter
+.ipynb_checkpoints/
+
+# OS noise
+.DS_Store
+Thumbs.db
