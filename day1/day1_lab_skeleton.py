@@ -40,12 +40,8 @@ from pydantic import BaseModel, Field
 
 from langchain_core.messages import HumanMessage
 
-# TODO STEP 0 — import the graph building blocks from langgraph.
-# You need: StateGraph, START, END from langgraph.graph
-#           InMemorySaver from langgraph.checkpoint.memory
-# WHERE TO LOOK: "Graph API" docs, first code example on the page.
-# from langgraph.graph import ...
-# from langgraph.checkpoint.memory import ...
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import InMemorySaver
 
 load_dotenv()
 
@@ -69,9 +65,13 @@ load_dotenv()
 
 class AgentState(TypedDict):
     topic: str
-    # TODO: add the remaining 6 keys (one uses Annotated + operator.add)
-    pass
-
+    search_query: str
+    collected_data: List[Dict]
+    analyzed_data: List[Dict]
+    quality_score: int
+    iteration_count: int
+    final_report: str
+    execution_logs: Annotated[List[str], operator.add]
 
 # ============================================================
 # STEP 2 — MODEL, SEARCH TOOL, EMBEDDINGS
@@ -131,7 +131,21 @@ class AgentState(TypedDict):
 # NOTE: TavilySearch.invoke({"query": q}) returns a DICT — the
 # actual sources are under the "results" key. print() it once to see.
 
-# TODO: your code here
+from langchain_openai import ChatOpenAI
+from langchain_community.tools import TavilySearchResults
+from langchain_core.vectorstores import InMemoryVectorStore
+from langchain_core.embeddings import FakeEmbeddings
+
+llm = ChatOpenAI(
+    model="nvidia/nemotron-3-super-120b-a12b:free",
+    temperature=0,
+    base_url="https://openrouter.ai/api/v1",
+)
+
+search_tool = TavilySearchResults(max_results=5)
+
+embeddings = FakeEmbeddings(size=1536)
+vector_store = InMemoryVectorStore(embeddings)
 
 
 # ============================================================
@@ -145,66 +159,99 @@ class AgentState(TypedDict):
 # ASK YOURSELF: what does with_structured_output return — a string,
 # a dict, or a QualityScore object?
 
-class QualityScore(BaseModel):
-    """Evaluation of research quality."""
-    score: int = Field(ge=1, le=10)
-    reasoning: str = Field(description="One-sentence justification")
-
-# TODO: evaluator = llm.with_structured_output(QualityScore)
-
-
-# ============================================================
-# STEP 4 — NODES
-# ============================================================
-# A node is just a function: takes state, returns a PARTIAL update
-# (a dict with ONLY the keys it changed). LangGraph merges it in.
-# Do NOT mutate state in place; do NOT return the whole state.
-#
-# WHERE TO LOOK: Use Graph API docs → "Define and update state".
-#   https://docs.langchain.com/oss/python/langgraph/use-graph-api
-
 def collect_node(state: AgentState):
-    """Search the web. On retries, CHANGE the query!"""
-    # TODO:
-    # 1. iteration = state["iteration_count"] + 1
-    # 2. Build a query that DIFFERS per iteration (why? see Step 5)
-    # 3. results = search_tool.invoke({"query": query})["results"]
-    # 4. return {"search_query": ..., "collected_data": ...,
-    #            "iteration_count": ..., "execution_logs": [...]}
-    pass
+    """Search the web. On retries, change the search query."""
+    iteration = state.get("iteration_count", 0) + 1
+    topic = state["topic"]
+    
+    if iteration == 1:
+        query = f"Research on {topic}"
+    elif iteration == 2:
+        query = f"Detailed analysis and technical details about {topic}"
+    else:
+        query = f"Future outlook and advanced application of {topic}"
+        
+    raw_response = search_tool.invoke({"query": query})
+    results = raw_response.get("results", []) if isinstance(raw_response, dict) else raw_response
+    
+    return {
+        "search_query": query,
+        "collected_data": results,
+        "iteration_count": iteration,
+        "execution_logs": [f"Collect Node: Found {len(results)} items using query '{query}' (Attempt #{iteration})"]
+    }
 
 
 def store_memory_node(state: AgentState):
     """Save source contents into the vector store."""
-    # TODO: vector_store.add_texts([...contents...])
-    pass
+    collected = state.get("collected_data", [])
+    texts_to_store = [item.get("content", "") for item in collected if item.get("content")]
+    
+    if texts_to_store:
+        vector_store.add_texts(texts_to_store)
+        
+    return {
+        "execution_logs": [f"Store Memory Node: Stored {len(texts_to_store)} snippets in vector store"]
+    }
 
 
 def analyze_node(state: AgentState):
-    """LLM-analyze each source. Bonus: retrieve related past
-    research with vector_store.similarity_search(content, k=2)
-    and include it in the prompt — that's what makes this RAG."""
-    # TODO
-    pass
+    """LLM-analyze each source with vector store context."""
+    collected = state.get("collected_data", [])
+    analyzed_data = []
+    
+    for item in collected:
+        content = item.get("content", "")
+        related_docs = vector_store.similarity_search(content, k=1) if content else []
+        related_text = related_docs[0].page_content if related_docs else "No prior context"
+        
+        prompt = f"Analyze this content for {state['topic']}:\n{content}\n\nRelated Context: {related_text}"
+        analysis_res = llm.invoke(prompt)
+        
+        analyzed_data.append({
+            "url": item.get("url", ""),
+            "summary": analysis_res.content
+        })
+        
+    return {
+        "analyzed_data": analyzed_data,
+        "execution_logs": [f"Analyze Node: Analyzed {len(analyzed_data)} sources"]
+    }
 
 
 def evaluate_node(state: AgentState):
-    """Score the research with the STRUCTURED evaluator (Step 3)."""
-    # TODO: return {"quality_score": result.score, "execution_logs": [...]}
-    pass
+    """Score the research with the structured evaluator."""
+    analyzed = state.get("analyzed_data", [])
+    combined_summary = "\n".join([item["summary"] for item in analyzed])
+    
+    prompt = f"Evaluate the completeness of research for topic '{state['topic']}':\n{combined_summary}"
+    result = evaluator.invoke(prompt)
+    
+    return {
+        "quality_score": result.score,
+        "execution_logs": [f"Evaluate Node: Assigned quality score {result.score}/10 (Reason: {result.reasoning})"]
+    }
 
 
 def report_node(state: AgentState):
-    """Generate the enterprise report from analyzed_data."""
-    # TODO
-    pass
+    """Generate the final research report."""
+    analyzed = state.get("analyzed_data", [])
+    combined = "\n".join([f"- {item['summary']}" for item in analyzed])
+    
+    prompt = f"Generate a detailed final report on '{state['topic']}' using these research insights:\n{combined}"
+    response = llm.invoke(prompt)
+    
+    return {
+        "final_report": response.content,
+        "execution_logs": ["Report Node: Generated final research report"]
+    }
 
 
 def audit_node(state: AgentState):
     """Log completion stats."""
-    # TODO
-    pass
-
+    return {
+        "execution_logs": [f"Audit Node: Research complete in {state.get('iteration_count', 0)} iteration(s)"]
+    }
 
 # ============================================================
 # STEP 5 — THE CONDITIONAL EDGE (the heart of this lab)
@@ -229,9 +276,13 @@ def audit_node(state: AgentState):
 # the docs insist on termination conditions.
 
 def quality_router(state: AgentState) -> str:
-    # TODO: return "report" or "collect"
-    pass
-
+    """Route to report if quality is high or max retries reached; else collect again."""
+    score = state.get("quality_score", 0)
+    iterations = state.get("iteration_count", 0)
+    
+    if score >= 7 or iterations >= 3:
+        return "report"
+    return "collect"
 
 # ============================================================
 # STEP 6 — WIRE THE GRAPH
@@ -247,7 +298,35 @@ def quality_router(state: AgentState) -> str:
 #
 # WHERE TO LOOK: Graph API docs → "Edges".
 
-# TODO: your code here
+# 1. Initialize the workflow graph
+workflow = StateGraph(AgentState)
+
+# 2. Add all six nodes to the graph
+workflow.add_node("collect", collect_node)
+workflow.add_node("store_memory", store_memory_node)
+workflow.add_node("analyze", analyze_node)
+workflow.add_node("evaluate", evaluate_node)
+workflow.add_node("report", report_node)
+workflow.add_node("audit", audit_node)
+
+# 3. Add the entry point from START to "collect"
+workflow.add_edge(START, "collect")
+
+# 4. Add sequential linear edges
+workflow.add_edge("collect", "store_memory")
+workflow.add_edge("store_memory", "analyze")
+workflow.add_edge("analyze", "evaluate")
+
+# 5. Add conditional edge from "evaluate" based on quality_router
+workflow.add_conditional_edges(
+    "evaluate",
+    quality_router,
+    {"collect": "collect", "report": "report"}
+)
+
+# 6. Add remaining edges leading to END
+workflow.add_edge("report", "audit")
+workflow.add_edge("audit", END)
 
 
 # ============================================================
@@ -286,8 +365,33 @@ if __name__ == "__main__":
         "final_report": "",
         "execution_logs": [],
     }
-    # TODO: compile, visualize, stream, print final report + logs
+# 1. Compile the graph with memory checkpointer
+    memory = InMemorySaver()
+    app = workflow.compile(checkpointer=memory)
 
+    # 2. Visualize the graph (prints Mermaid format diagram)
+    print("--- GRAPH MERMAID DIAGRAM ---")
+    try:
+        print(app.get_graph().draw_mermaid())
+    except Exception as e:
+        print(f"Could not render diagram: {e}")
+    print("-----------------------------\n")
+
+    # 3. Configure and run with streaming mode
+    config = {"configurable": {"thread_id": "run-1"}}
+    
+    print("Starting agent execution...\n")
+    for chunk in app.stream(initial_state, config, stream_mode="values"):
+        logs = chunk.get("execution_logs", [])
+        if logs:
+            print(f"Latest Log: {logs[-1]}")
+
+    # Fetch final state to display the report
+    final_state = app.get_state(config).values
+
+    print("\n================ FINAL REPORT ================")
+    print(final_state.get("final_report", "No report generated."))
+    print("==============================================")
 
 # ============================================================
 # SELF-CHECK before you look at the solution
