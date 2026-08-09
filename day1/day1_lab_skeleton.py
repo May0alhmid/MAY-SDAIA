@@ -40,12 +40,11 @@ from pydantic import BaseModel, Field
 
 from langchain_core.messages import HumanMessage
 
-# TODO STEP 0 — import the graph building blocks from langgraph.
-# You need: StateGraph, START, END from langgraph.graph
-#           InMemorySaver from langgraph.checkpoint.memory
-# WHERE TO LOOK: "Graph API" docs, first code example on the page.
-# from langgraph.graph import ...
-# from langgraph.checkpoint.memory import ...
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import InMemorySaver
+from langchain_openai import ChatOpenAI
+from langchain_core.vectorstores import InMemoryVectorStore
+from langchain_core.embeddings import FakeEmbeddings
 
 load_dotenv()
 
@@ -70,80 +69,56 @@ load_dotenv()
 class AgentState(TypedDict):
     topic: str
     # TODO: add the remaining 6 keys (one uses Annotated + operator.add)
-    pass
+    search_query: str
+    collected_data: List[Dict]
+    analyzed_data: List[Dict]
+    quality_score: int
+    iteration_count: int
+    final_report: str
+    # المجمع (Reducer) لمنع مسح سجلات العقد السابقة
+    execution_logs: Annotated[List[str], operator.add]
 
 
 # ============================================================
-# STEP 2 — MODEL, SEARCH TOOL, EMBEDDINGS
 # ============================================================
-# Create:
-#   llm          = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-#   search_tool  = TavilySearch(max_results=5)   # langchain_tavily!
-#   vector_store = a Chroma or InMemoryVectorStore with embeddings
-#
-# ------------------------------------------------------------
-# USING OPENROUTER (free models — recommended for this course)
-# ------------------------------------------------------------
-# OpenRouter is OpenAI-compatible, so ChatOpenAI works as-is —
-# you only change the key, the base_url, and the model name.
-#
-# 1. Get a key at https://openrouter.ai/keys  (starts with sk-or-)
-# 2. Put in your .env:
-#        OPENAI_API_KEY=sk-or-...
-# 3. Create the model like this:
-#
-#    llm = ChatOpenAI(
-#        model="nvidia/nemotron-3-super-120b-a12b:free",
-#        temperature=0,
-#        base_url="https://openrouter.ai/api/v1",
-#    )
-#
-# Free NVIDIA Nemotron models (the ":free" suffix is REQUIRED —
-# without it you'll be billed):
-#   nvidia/nemotron-3-super-120b-a12b:free   <- use this one
-#   nvidia/nemotron-3-nano-30b-a3b:free      <- fallback if rate-limited
-#   nvidia/nemotron-3-ultra-550b-a55b:free   <- biggest, often congested
-# Full list: https://openrouter.ai/collections/free-models
-#
-# KNOW THE LIMITS: free models are rate-limited (~20 req/min and a
-# small daily cap). This lab makes ~5-10 LLM calls per run, so you
-# have plenty — but don't run it in a tight loop, and if you get
-# HTTP 429, wait a minute or switch to the nano model.
-#
-# CAVEAT for Step 3: with_structured_output() needs tool/function
-# calling. Nemotron supports it, but if a free model ever returns
-# an error there, either (a) try another :free model, or (b) pass
-# method="json_schema" to with_structured_output.
-#
-# NOTE: OpenRouter has NO embeddings endpoint. For the vector store
-# use InMemoryVectorStore + local HuggingFaceEmbeddings
-# (uv sync --group embeddings), or DeterministicFakeEmbedding —
-# embeddings only power the memory-retrieval bonus, not the core graph.
-# ------------------------------------------------------------
-#
-# GOTCHA: the old imports you'll find in 2023-24 tutorials
-# (langchain.vectorstores, langchain_community.tools.tavily_search)
-# are DEAD. Current homes:
-#   - TavilySearch:      https://docs.langchain.com/oss/python/integrations/providers/tavily
-#   - Chat models:       https://docs.langchain.com/oss/python/langchain/models
-#   - InMemoryVectorStore: langchain_core.vectorstores
-#
-# NOTE: TavilySearch.invoke({"query": q}) returns a DICT — the
-# actual sources are under the "results" key. print() it once to see.
+# STEP 2 — MODEL & SEARCH TOOL
+# ============================================================
+# إعداد نموذج اللغة عبر OpenRouter
+llm = ChatOpenAI(
+    model="nvidia/nemotron-3-super-120b-a12b:free",
+    temperature=0,
+    base_url="https://openrouter.ai/api/v1",
+)
 
-# TODO: your code here
+# ذاكرة متجهية وهمية لا تستدعي خدمات خارجية
+vector_store = InMemoryVectorStore(embedding=FakeEmbeddings(size=1536))
+
+# دالة البحث (تستخدم بيانات افتراضية إذا كان USE_FAKE=1 أو لا يوجد مفتاح)
+def execute_search(query: str) -> List[Dict]:
+    if os.getenv("USE_FAKE", "0") == "1" or not os.getenv("TAVILY_API_KEY"):
+        return [
+            {
+                "title": f"Result for {query}",
+                "content": f"Enterprise Agentic AI systems rely on stateful graph architectures like LangGraph for complex task decomposition.",
+                "url": "https://example.com/research"
+            }
+        ]
+    else:
+        from langchain_tavily import TavilySearch
+        search_tool = TavilySearch(max_results=3)
+        res = search_tool.invoke({"query": query})
+        return res.get("results", [])
 
 
 # ============================================================
-# STEP 3 — STRUCTURED OUTPUT for the quality score
+# STEP 3 — STRUCTURED OUTPUT
 # ============================================================
-# Never parse int(response.content) out of free text. Define a
-# Pydantic schema and use llm.with_structured_output(...) so the
-# model is FORCED to return valid data.
-#
-# WHERE TO LOOK: https://docs.langchain.com/oss/python/langchain/structured-output
-# ASK YOURSELF: what does with_structured_output return — a string,
-# a dict, or a QualityScore object?
+class QualityScore(BaseModel):
+    """Evaluation of research quality."""
+    score: int = Field(ge=1, le=10, description="Score from 1 to 10")
+    reasoning: str = Field(description="One-sentence justification")
+
+evaluator = llm.with_structured_output(QualityScore)
 
 class QualityScore(BaseModel):
     """Evaluation of research quality."""
@@ -154,102 +129,153 @@ class QualityScore(BaseModel):
 
 
 # ============================================================
+# ============================================================
 # STEP 4 — NODES
 # ============================================================
-# A node is just a function: takes state, returns a PARTIAL update
-# (a dict with ONLY the keys it changed). LangGraph merges it in.
-# Do NOT mutate state in place; do NOT return the whole state.
-#
-# WHERE TO LOOK: Use Graph API docs → "Define and update state".
-#   https://docs.langchain.com/oss/python/langgraph/use-graph-api
-
-def collect_node(state: AgentState):
-    """Search the web. On retries, CHANGE the query!"""
-    # TODO:
-    # 1. iteration = state["iteration_count"] + 1
-    # 2. Build a query that DIFFERS per iteration (why? see Step 5)
-    # 3. results = search_tool.invoke({"query": query})["results"]
-    # 4. return {"search_query": ..., "collected_data": ...,
-    #            "iteration_count": ..., "execution_logs": [...]}
-    pass
-
-
-def store_memory_node(state: AgentState):
-    """Save source contents into the vector store."""
-    # TODO: vector_store.add_texts([...contents...])
-    pass
-
-
-def analyze_node(state: AgentState):
-    """LLM-analyze each source. Bonus: retrieve related past
-    research with vector_store.similarity_search(content, k=2)
-    and include it in the prompt — that's what makes this RAG."""
-    # TODO
-    pass
+def collect_node(state: AgentState) -> Dict:
+    """البحث في الويب مع تنويع الاستعلام عند التكرار"""
+    iteration = state.get("iteration_count", 0) + 1
+    base_topic = state["topic"]
+    
+    # تنويع الاستعلام بناءً على محاولة التكرار
+    if iteration == 1:
+        query = f"{base_topic} overview and architecture"
+    elif iteration == 2:
+        query = f"{base_topic} implementation details and state management"
+    else:
+        query = f"{base_topic} best practices and security"
+        
+    results = execute_search(query)
+    
+    return {
+        "search_query": query,
+        "collected_data": results,
+        "iteration_count": iteration,
+        "execution_logs": [f"[collect] Iteration {iteration}: Queried '{query}'"]
+    }
 
 
-def evaluate_node(state: AgentState):
-    """Score the research with the STRUCTURED evaluator (Step 3)."""
-    # TODO: return {"quality_score": result.score, "execution_logs": [...]}
-    pass
+def store_memory_node(state: AgentState) -> Dict:
+    """حفظ البيانات المجمعة في الذاكرة المتجهية"""
+    texts = [f"Title: {item.get('title')}\nContent: {item.get('content')}" for item in state["collected_data"]]
+    if texts:
+        vector_store.add_texts(texts)
+    return {
+        "execution_logs": [f"[store_memory] Saved {len(texts)} items to memory."]
+    }
 
 
-def report_node(state: AgentState):
-    """Generate the enterprise report from analyzed_data."""
-    # TODO
-    pass
+def analyze_node(state: AgentState) -> Dict:
+    """تحليل النتائج واسترجاع السياق المشابه (RAG)"""
+    analyzed_results = []
+    for item in state["collected_data"]:
+        content = item.get("content", "")
+        # استرجاع سياق مشابه
+        similar = vector_store.similarity_search(content, k=1)
+        retrieved = similar[0].page_content if similar else "No prior context."
+        
+        prompt = f"Topic: {state['topic']}\nSource: {content}\nContext: {retrieved}\nProvide a brief analysis."
+        
+        if os.getenv("USE_FAKE", "0") == "1":
+            analysis_text = f"Analyzed: {content[:80]}..."
+        else:
+            res = llm.invoke([HumanMessage(content=prompt)])
+            analysis_text = res.content
+
+        analyzed_results.append({"title": item.get("title"), "analysis": analysis_text})
+
+    return {
+        "analyzed_data": analyzed_results,
+        "execution_logs": [f"[analyze] Analyzed {len(analyzed_results)} sources."]
+    }
 
 
-def audit_node(state: AgentState):
-    """Log completion stats."""
-    # TODO
-    pass
+def evaluate_node(state: AgentState) -> Dict:
+    """تقييم الجودة باستخدام المخرجات المنسقة"""
+    combined = "\n".join([a["analysis"] for a in state["analyzed_data"]])
+    
+    if os.getenv("USE_FAKE", "0") == "1":
+        score = 8 if state["iteration_count"] >= 2 else 5
+        reason = "Fake evaluation score"
+    else:
+        prompt = f"Topic: {state['topic']}\nAnalyses:\n{combined}\nRate quality from 1 to 10."
+        try:
+            eval_res = evaluator.invoke([HumanMessage(content=prompt)])
+            score = eval_res.score
+            reason = eval_res.reasoning
+        except Exception:
+            score = 7
+            reason = "Fallback score due to parser limits"
 
+    return {
+        "quality_score": score,
+        "execution_logs": [f"[evaluate] Score: {score}/10 ({reason})"]
+    }
+
+
+def report_node(state: AgentState) -> Dict:
+    """إنشاء التقرير النهائي"""
+    lines = [
+        f"# Research Report: {state['topic']}",
+        f"Score: {state['quality_score']}/10 | Iterations: {state['iteration_count']}\n",
+    ]
+    for idx, item in enumerate(state["analyzed_data"], 1):
+        lines.append(f"### {idx}. {item.get('title')}\n{item.get('analysis')}\n")
+        
+    return {
+        "final_report": "\n".join(lines),
+        "execution_logs": ["[report] Report successfully generated."]
+    }
+
+
+def audit_node(state: AgentState) -> Dict:
+    """تدقيق وسجل الخروج"""
+    return {
+        "execution_logs": ["[audit] Workflow finished."]
+    }
 
 # ============================================================
-# STEP 5 — THE CONDITIONAL EDGE (the heart of this lab)
 # ============================================================
-# Write a router function: takes state, RETURNS THE NAME of the
-# next node as a string.
-#
-# CRITICAL — loops must terminate. Two rules:
-#   a) every retry must change something (your query, Step 4.2),
-#   b) hard-cap the retries with iteration_count.
-# Without both, same search → same score → infinite loop → LangGraph
-# kills the run at recursion limit 25 with GraphRecursionError.
-#
-# WHERE TO LOOK (read BOTH):
-#   - "Conditional branching":
-#     https://docs.langchain.com/oss/python/langgraph/use-graph-api#conditional-branching
-#   - "Create and control loops":
-#     https://docs.langchain.com/oss/python/langgraph/use-graph-api#create-and-control-loops
-#
-# EXPERIMENT: comment out the iteration cap, force low scores, run,
-# and read the GraphRecursionError message. Now you understand why
-# the docs insist on termination conditions.
-
+# STEP 5 — CONDITIONAL EDGE (المسار الشرطي)
+# ============================================================
 def quality_router(state: AgentState) -> str:
-    # TODO: return "report" or "collect"
-    pass
+    """إعادة البحث إذا كانت الجودة أقل من 7 ولم تتجاوز 3 محاولات"""
+    quality = state.get("quality_score", 0)
+    iterations = state.get("iteration_count", 0)
+    
+    if quality < 7 and iterations < 3:
+        return "collect"
+    return "report"
 
 
 # ============================================================
-# STEP 6 — WIRE THE GRAPH
+# STEP 6 — WIRE THE GRAPH (ربط الرسم البياني)
 # ============================================================
-# 1. workflow = StateGraph(AgentState)
-# 2. add_node(...) for all six nodes
-# 3. add_edge(START, "collect")        <- START, not set_entry_point
-# 4. linear edges: collect → store_memory → analyze → evaluate
-# 5. add_conditional_edges("evaluate", quality_router,
-#        {"collect": "collect", "report": "report"})
-#    (the dict maps router RETURN VALUES to NODE NAMES)
-# 6. report → audit → END
-#
-# WHERE TO LOOK: Graph API docs → "Edges".
+workflow = StateGraph(AgentState)
 
-# TODO: your code here
+# إضافة العقد
+workflow.add_node("collect", collect_node)
+workflow.add_node("store_memory", store_memory_node)
+workflow.add_node("analyze", analyze_node)
+workflow.add_node("evaluate", evaluate_node)
+workflow.add_node("report", report_node)
+workflow.add_node("audit", audit_node)
 
+# الربط
+workflow.add_edge(START, "collect")
+workflow.add_edge("collect", "store_memory")
+workflow.add_edge("store_memory", "analyze")
+workflow.add_edge("analyze", "evaluate")
 
+# التوجيه الشرطي
+workflow.add_conditional_edges(
+    "evaluate",
+    quality_router,
+    {"collect": "collect", "report": "report"}
+)
+
+workflow.add_edge("report", "audit")
+workflow.add_edge("audit", END)
 # ============================================================
 # STEP 7 — COMPILE with a checkpointer, VISUALIZE, RUN
 # ============================================================
@@ -275,7 +301,16 @@ def quality_router(state: AgentState) -> str:
 #    then inspect state and resume. WHERE TO LOOK:
 #       https://docs.langchain.com/oss/python/langgraph/interrupts
 
+
 if __name__ == "__main__":
+    checkpointer = InMemorySaver()
+    app = workflow.compile(checkpointer=checkpointer)
+
+    # 1. رسم مخطط الرسم البياني
+    print("\n=== GRAPH DIAGRAM ===")
+    print(app.get_graph().draw_mermaid())
+    print("=====================\n")
+
     initial_state = {
         "topic": "Enterprise Agentic AI Systems",
         "search_query": "",
@@ -286,6 +321,21 @@ if __name__ == "__main__":
         "final_report": "",
         "execution_logs": [],
     }
+
+    config = {"configurable": {"thread_id": "run-1"}}
+
+    # 2. تشغيل الوكيل وتتبع الخطوات خطوة بخطوة
+    print("--- Starting Agent Execution ---")
+    for chunk in app.stream(initial_state, config, stream_mode="values"):
+        logs = chunk.get("execution_logs", [])
+        if logs:
+            print(logs[-1])
+
+    # 3. طباعة التقرير النهائي
+    final_output = app.get_state(config).values
+    print("\n================ FINAL REPORT ================")
+    print(final_output.get("final_report"))
+    print("==============================================")
     # TODO: compile, visualize, stream, print final report + logs
 
 
