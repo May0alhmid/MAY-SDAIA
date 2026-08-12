@@ -53,9 +53,16 @@ from pydantic import BaseModel, Field
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+<<<<<<< HEAD
 # STEP 0 — Imports
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import InMemorySaver
+=======
+# TODO STEP 0 — same imports as Day 1:
+# StateGraph, START, END from langgraph.graph
+# InMemorySaver from langgraph.checkpoint.memory
+
+>>>>>>> 217e1a9 (Day 2: multi-agent lab skeleton, README, slides)
 load_dotenv()
 
 MAX_REVISIONS = 2      # cap on writer↔critic loops
@@ -63,6 +70,7 @@ MAX_TURNS = 12         # cap on total supervisor decisions
 
 
 # ============================================================
+<<<<<<< HEAD
 class TeamState(TypedDict):
     task: str
     research_notes: Annotated[List[str], operator.add]  # إضافة تراكمية دون مسح
@@ -73,10 +81,36 @@ class TeamState(TypedDict):
     turn_count: int
     next_agent: str                                     # قرار المشرف يكتب هنا
     execution_logs: Annotated[List[str], operator.add]  # سجل خط سير العمل
+=======
+# STEP 1 — SHARED STATE: the team's "blackboard"
+# ============================================================
+# Day 1's state was a data PIPELINE (each field filled once, in
+# order). Day 2's state is a BLACKBOARD: every agent reads all of
+# it and writes only its own section; the supervisor reads it to
+# decide who goes next.
+#
+# Define a TypedDict with:
+#   task (str)
+#   research_notes  <- List[str], APPEND-ONLY (which reducer? Day 1!)
+#   analysis (str), draft (str), critique (str)
+#   revision_count (int), turn_count (int)
+#   next_agent (str)   <- the supervisor writes its decision HERE
+#   execution_logs     <- append-only, same as Day 1
+#
+# ASK YOURSELF: why must research_notes append but draft overwrite?
+# What would happen to the revision loop if draft used operator.add?
+
+class TeamState(TypedDict):
+    task: str
+    # TODO: add the remaining 8 keys (two use Annotated + operator.add)
+    pass
+
+>>>>>>> 217e1a9 (Day 2: multi-agent lab skeleton, README, slides)
 
 # ============================================================
 # STEP 2 — STRUCTURED ROUTING DECISION
 # ============================================================
+<<<<<<< HEAD
 class RouterDecision(BaseModel):
     """قرار التوجيه المنسق الذي يتخذه المشرف."""
     next_agent: Literal["researcher", "analyst", "writer", "critic", "FINISH"]
@@ -148,10 +182,56 @@ def run_persona(role: str, user_content: str) -> str:
     ]
     response = llm.invoke(messages)
     return response.content
+=======
+# Day 1: structured output produced a quality SCORE.
+# Day 2: structured output produces a ROUTING DECISION — this is
+# the trick that turns an LLM into a supervisor. Literal[...] means
+# the model CANNOT invent an agent that doesn't exist.
+#
+# WHERE TO LOOK: structured-output docs (same page as Day 1).
+
+class RouterDecision(BaseModel):
+    """The supervisor's choice of who acts next."""
+    next_agent: Literal["researcher", "analyst", "writer", "critic", "FINISH"]
+    reason: str = Field(description="One sentence explaining the choice")
+
+
+# ============================================================
+# STEP 3 — ONE LLM, FOUR PERSONAS (+ tools scoped per agent)
+# ============================================================
+# A multi-agent "team" doesn't need four models — it needs four
+# SYSTEM PROMPTS. (In production you might also vary the model per
+# agent: cheap model for the critic, big one for the writer.)
+#
+# TODO:
+# 1. Write a PERSONAS dict: role -> system prompt, for
+#    "researcher", "analyst", "writer", "critic".
+#    Each persona must say what the agent DOES and what it MUST NOT
+#    do (e.g. the researcher never analyzes). Boundaries between
+#    agents live in the prompts — write them sharp.
+# 2. Create llm (ChatOpenAI + OpenRouter, exactly like Day 1) and
+#    search_tool (TavilySearch(max_results=4)).
+# 3. supervisor_llm = llm.with_structured_output(RouterDecision)
+# 4. Helper: run_persona(role, user_content) → invoke llm with
+#    [SystemMessage(PERSONAS[role]), HumanMessage(user_content)]
+#    and return response.content.
+#
+# TOOL SCOPING: only the researcher node may call search_tool.
+# That's a deliberate design decision, not a limitation — ask
+# yourself what could go wrong if the critic could search.
+
+PERSONAS = {
+    # TODO: four personas
+}
+
+# TODO: llm, search_tool, supervisor_llm, run_persona
+
+>>>>>>> 217e1a9 (Day 2: multi-agent lab skeleton, README, slides)
 
 # ============================================================
 # STEP 4 — THE SUPERVISOR NODE (the piece Day 1 didn't have)
 # ============================================================
+<<<<<<< HEAD
 def supervisor_node(state: TeamState):
     turn_count = state.get("turn_count", 0) + 1
     
@@ -197,10 +277,34 @@ def supervisor_node(state: TeamState):
         "turn_count": turn_count,
         "execution_logs": [log_entry]
     }
+=======
+# The supervisor node must:
+# 1. Increment turn_count.
+# 2. Build a STATUS SUMMARY of the blackboard (which sections are
+#    filled? what does the critique say? how many revisions?).
+#    Don't dump the full text of everything — the supervisor needs
+#    STATUS, not content. (Why? Think tokens and attention.)
+# 3. Ask supervisor_llm for a RouterDecision.
+# 4. GUARDRAILS — never trust an LLM to terminate a loop:
+#      a) if turn_count > MAX_TURNS → force FINISH
+#      b) if the LLM picks writer/critic but revision_count >=
+#         MAX_REVISIONS and a draft exists → force FINISH
+#    This is Day 1's iteration cap wearing a new hat. Same lesson:
+#    the LLM proposes, YOUR CODE disposes.
+# 5. Return {"next_agent": ..., "turn_count": ..., "execution_logs": [...]}
+#
+# WHERE TO LOOK: multi-agent docs → "Supervisor" section.
+
+def supervisor_node(state: TeamState):
+    # TODO
+    pass
+
+>>>>>>> 217e1a9 (Day 2: multi-agent lab skeleton, README, slides)
 
 # ============================================================
 # STEP 5 — WORKER AGENT NODES
 # ============================================================
+<<<<<<< HEAD
 def researcher_node(state: TeamState):
     if USE_FAKE:
         raw_results = "Fake search results for multi-agent systems."
@@ -305,6 +409,89 @@ if __name__ == "__main__":
     checkpointer = InMemorySaver()
     graph = builder.compile(checkpointer=checkpointer)
 
+=======
+# Each worker: read the blackboard → act in persona → return a
+# PARTIAL update with ONLY its own section (Day 1 rule, unchanged).
+
+def researcher_node(state: TeamState):
+    """Search the web (ONLY this agent may), condense to notes."""
+    # TODO:
+    # 1. results = search_tool.invoke({"query": state["task"]})["results"]
+    # 2. Format results into a raw text block (title, content, url)
+    # 3. notes = run_persona("researcher", f"Task ...\n\nSearch results:\n{raw}")
+    # 4. return {"research_notes": [notes], "execution_logs": [...]}
+    #    ^ note the LIST — research_notes is append-only!
+    pass
+
+
+def analyst_node(state: TeamState):
+    """Turn raw notes into analysis."""
+    # TODO: run_persona("analyst", ...) → {"analysis": ..., "execution_logs": [...]}
+    pass
+
+
+def writer_node(state: TeamState):
+    """Write the draft — or REVISE it if a critique is present."""
+    # TODO:
+    # 1. revising = critique exists and starts with "REVISE"
+    # 2. Build the prompt; when revising, include the previous draft
+    #    AND the critique so the writer knows what to fix.
+    # 3. return {"draft": ...,
+    #            "critique": "",   <- WHY reset this? (see self-check)
+    #            "revision_count": +1 only when revising,
+    #            "execution_logs": [...]}
+    pass
+
+
+def critic_node(state: TeamState):
+    """Review the draft against the research notes."""
+    # TODO: run_persona("critic", ...) → the persona replies either
+    # "APPROVED" or "REVISE: <fixes>". Store it in critique.
+    pass
+
+
+# ============================================================
+# STEP 6 — ROUTING FUNCTION + WIRE THE GRAPH
+# ============================================================
+# The conditional-edge function is now TRIVIAL — it just reads the
+# supervisor's decision:
+#
+#     def route_from_supervisor(state) -> str:
+#         return state["next_agent"]
+#
+# Compare with Day 1, where all decision logic lived inside
+# quality_router. The intelligence MOVED from the edge into a node.
+#
+# Wiring checklist:
+# 1. add all five nodes
+# 2. START → supervisor
+# 3. add_conditional_edges("supervisor", route_from_supervisor,
+#        {"researcher": "researcher", "analyst": "analyst",
+#         "writer": "writer", "critic": "critic", "FINISH": END})
+# 4. EVERY worker gets an edge BACK to supervisor — the
+#    hub-and-spoke shape that defines the supervisor pattern.
+#    (A for-loop over the four worker names is idiomatic.)
+
+# TODO: route_from_supervisor + graph wiring
+
+
+# ============================================================
+# STEP 7 — COMPILE, VISUALIZE, RUN
+# ============================================================
+# Same as Day 1: compile with InMemorySaver, print the Mermaid
+# diagram (it should look like a STAR, not Day 1's chain), stream
+# with stream_mode="values" and a thread_id, print the final draft.
+#
+# EXPERIMENT 1: set MAX_REVISIONS = 0. What happens to quality?
+# EXPERIMENT 2: delete guardrail (a) and make the critic always
+#   say REVISE. Watch the turn cap save you — then delete guardrail
+#   (b) too and meet your old friend GraphRecursionError.
+# EXPERIMENT 3: swap the analyst's persona for a terrible one
+#   ("you are vague and generic"). How far does the damage spread
+#   through the team? This is why persona boundaries matter.
+
+if __name__ == "__main__":
+>>>>>>> 217e1a9 (Day 2: multi-agent lab skeleton, README, slides)
     initial_state = {
         "task": "Should our company adopt multi-agent AI systems in 2026?",
         "research_notes": [],
@@ -316,6 +503,7 @@ if __name__ == "__main__":
         "next_agent": "",
         "execution_logs": [],
     }
+<<<<<<< HEAD
 
     config = {"configurable": {"thread_id": "day2_lab"}}
 
@@ -329,6 +517,11 @@ if __name__ == "__main__":
     print("\n================ FINAL DRAFT ================")
     print(final_state.get("draft", "No draft generated."))
     print("=============================================")
+=======
+    # TODO: compile, visualize, stream, print final draft + stats
+
+
+>>>>>>> 217e1a9 (Day 2: multi-agent lab skeleton, README, slides)
 # ============================================================
 # SELF-CHECK before you look at the solution
 # ============================================================
