@@ -71,14 +71,19 @@ MISSION = (
     "4. Report exactly what the program printed, plus one sentence of insight."
 )
 
-
 if __name__ == "__main__":
-    # TODO (all sync, ~8 lines):
-    #   backend, cleanup = make_backend()
-    #   try:
-    #       agent = create_deep_agent(... tools=[fetch_internal_report] ...)
-    #       result = agent.invoke({"messages": [{"role": "user", "content": MISSION}]})
-    #       print(result["messages"][-1].content)
-    #   finally:
-    #       cleanup()
-    pass
+    from deepagents import create_deep_agent
+    from shell_agent import llm, SYSTEM_PROMPT, make_backend
+
+    backend, cleanup = make_backend()
+    try:
+        agent = create_deep_agent(
+            model=llm,
+            system_prompt=SYSTEM_PROMPT,
+            tools=[fetch_internal_report],
+            backend=backend,
+        )
+        result = asyncio.run(agent.ainvoke({"messages": [{"role": "user", "content": MISSION}]}))
+        print(result["messages"][-1].content)
+    finally:
+        cleanup()
