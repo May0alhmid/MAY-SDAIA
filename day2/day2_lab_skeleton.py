@@ -86,6 +86,13 @@ from langchain_openai import ChatOpenAI
 from langchain_community.tools import TavilySearchResults
 
 # 1. تعريف شخصيات الوكلاء والمهام الخاصة بكل منهم
+# ============================================================
+# STEP 3 — ONE LLM, FOUR PERSONAS (+ tools scoped per agent)
+# ============================================================
+
+USE_FAKE = os.getenv("USE_FAKE") == "1"
+
+# 1. تعريف قاموس الشخصيات (تأكد من وجود هذا الجزء كاملاً)
 PERSONAS = {
     "researcher": (
         "You are an expert researcher. Your ONLY job is to search for raw facts and evidence related to the task. "
@@ -106,17 +113,35 @@ PERSONAS = {
     )
 }
 
-# 2. تهيئة النموذج وأداة البحث
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+# 2. تهيئة النموذج والأدوات
+if not USE_FAKE:
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENROUTER_API_KEY")
+    tavily_key = os.getenv("TAVILY_API_KEY")
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=api_key)
+    supervisor_llm = llm.with_structured_output(RouterDecision)
+    search_tool = TavilySearchResults(max_results=4, tavily_api_key=tavily_key)
+else:
+    llm = None
+    supervisor_llm = None
+    search_tool = None
 
-# أداة البحث مخصصة فقط للـ researcher
-search_tool = TavilySearchResults(max_results=4)
-
-# 3. ربط المشرف بالخرج المنسق (Structured Output)
-supervisor_llm = llm.with_structured_output(RouterDecision)
-
-# 4. دالة مساعدة لتشغيل أي شخصية
+# 3. دالة تشغيل الشخصيات
 def run_persona(role: str, user_content: str) -> str:
+    if USE_FAKE:
+        if role == "researcher":
+            return "Fake Notes: Multi-agent systems provide specialized division of labor and autonomy."
+        elif role == "analyst":
+            return "Fake Analysis: Adoption in 2026 reduces operational bottlenecks but increases latency."
+        elif role == "writer":
+            if "REVISE" in user_content:
+                return "Fake Revised Draft: Comprehensive analysis on multi-agent systems adoption in 2026."
+            return "Fake Initial Draft: Overview of multi-agent systems in 2026."
+        elif role == "critic":
+            if "Revised Draft" in user_content:
+                return "APPROVED"
+            return "REVISE: Please make the draft more detailed regarding trade-offs."
+        return "Fake Response"
+
     messages = [
         SystemMessage(content=PERSONAS[role]),
         HumanMessage(content=user_content)
@@ -130,32 +155,42 @@ def run_persona(role: str, user_content: str) -> str:
 def supervisor_node(state: TeamState):
     turn_count = state.get("turn_count", 0) + 1
     
-    # ملخص حالة السبورة (Status Summary) للمشرف ليتخذ القرار
-    status_summary = (
-        f"Task: {state['task']}\n"
-        f"Research done? {'YES' if state.get('research_notes') else 'NO'}\n"
-        f"Analysis done? {'YES' if state.get('analysis') else 'NO'}\n"
-        f"Draft present? {'YES' if state.get('draft') else 'NO'}\n"
-        f"Critique: {state.get('critique', 'None')}\n"
-        f"Revision count: {state.get('revision_count', 0)}/{MAX_REVISIONS}\n"
-        f"Turn count: {turn_count}/{MAX_TURNS}"
-    )
+    if USE_FAKE:
+        # تسلسل وهمي لقرار المشرف لاستعراض خط سير العمل (Choreography)
+        if not state.get("research_notes"):
+            next_agent, reason = "researcher", "Need research notes"
+        elif not state.get("analysis"):
+            next_agent, reason = "analyst", "Need analysis of research"
+        elif not state.get("draft"):
+            next_agent, reason = "writer", "Need initial draft"
+        elif state.get("critique") == "APPROVED":
+            next_agent, reason = "FINISH", "Draft approved"
+        elif state.get("critique", "").startswith("REVISE"):
+            next_agent, reason = "writer", "Need draft revision based on critique"
+        else:
+            next_agent, reason = "critic", "Need critique of the current draft"
+    else:
+        status_summary = (
+            f"Task: {state['task']}\n"
+            f"Research done? {'YES' if state.get('research_notes') else 'NO'}\n"
+            f"Analysis done? {'YES' if state.get('analysis') else 'NO'}\n"
+            f"Draft present? {'YES' if state.get('draft') else 'NO'}\n"
+            f"Critique: {state.get('critique', 'None')}\n"
+            f"Revision count: {state.get('revision_count', 0)}/{MAX_REVISIONS}\n"
+            f"Turn count: {turn_count}/{MAX_TURNS}"
+        )
+        prompt = f"Given the team's current status, who should act next?\n\n{status_summary}"
+        decision: RouterDecision = supervisor_llm.invoke([HumanMessage(content=prompt)])
+        next_agent, reason = decision.next_agent, decision.reason
 
-    prompt = f"Given the team's current status, who should act next?\n\n{status_summary}"
-    decision: RouterDecision = supervisor_llm.invoke([HumanMessage(content=prompt)])
-    
-    next_agent = decision.next_agent
-
-    # Guardrails (حواجز الأمان برمجياً):
-    # 1. إذا تجاوزنا الحد الأقصى للمحاولات الكلية -> إنهاء اجباري
+    # Guardrails
     if turn_count > MAX_TURNS:
         next_agent = "FINISH"
-    # 2. إذا وصلنا للحد الأقصى للتعديلات ويوجد مسودة -> إنهاء إجباري
     elif state.get("revision_count", 0) >= MAX_REVISIONS and state.get("draft"):
         if next_agent in ["writer", "critic"]:
             next_agent = "FINISH"
 
-    log_entry = f"Supervisor (Turn {turn_count}): Selected {next_agent}. Reason: {decision.reason}"
+    log_entry = f"Supervisor (Turn {turn_count}): Selected {next_agent}. Reason: {reason}"
     
     return {
         "next_agent": next_agent,
@@ -167,11 +202,13 @@ def supervisor_node(state: TeamState):
 # STEP 5 — WORKER AGENT NODES
 # ============================================================
 def researcher_node(state: TeamState):
-    """البحث وجمع المعلومات"""
-    try:
-        raw_results = search_tool.invoke({"query": state["task"]})
-    except Exception:
-        raw_results = "No search results available."
+    if USE_FAKE:
+        raw_results = "Fake search results for multi-agent systems."
+    else:
+        try:
+            raw_results = search_tool.invoke({"query": state["task"]})
+        except Exception:
+            raw_results = "No search results available."
 
     notes = run_persona("researcher", f"Task: {state['task']}\n\nSearch Results:\n{raw_results}")
     
