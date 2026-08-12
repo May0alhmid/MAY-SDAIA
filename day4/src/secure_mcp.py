@@ -36,7 +36,10 @@ def get_internal_report() -> dict:
         "quarterly_costs": 98000,
         "confidential": True,
     }
-
+@mcp.tool(auth=require_scopes("read:internal"))
+def get_lab_inventory() -> dict:
+    """Return lab inventory counts. Requires read:internal scope."""
+    return {"laptops": 24, "monitors": 18, "cables_damaged": 5, "total_items": 47}
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8002)
