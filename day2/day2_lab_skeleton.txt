@@ -1,0 +1,90 @@
+import os
+import operator
+from datetime import datetime
+from typing import Annotated, List, Literal
+from typing_extensions import TypedDict
+
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+
+from langchain_core.messages import HumanMessage, SystemMessage
+
+# TODO STEP 0 — same imports as Day 1:
+# StateGraph, START, END from langgraph.graph
+# InMemorySaver from langgraph.checkpoint.memory
+
+load_dotenv()
+
+MAX_REVISIONS = 2      # cap on writer↔critic loops
+MAX_TURNS = 12         # cap on total supervisor decisions
+
+class TeamState(TypedDict):
+    task: str
+    # TODO: add the remaining 8 keys (two use Annotated + operator.add)
+    pass
+
+class RouterDecision(BaseModel):
+    """The supervisor's choice of who acts next."""
+    next_agent: Literal["researcher", "analyst", "writer", "critic", "FINISH"]
+    reason: str = Field(description="One sentence explaining the choice")
+
+PERSONAS = {
+    # TODO: four personas
+}
+
+# TODO: llm, search_tool, supervisor_llm, run_persona
+
+def supervisor_node(state: TeamState):
+    # TODO
+    pass
+
+def researcher_node(state: TeamState):
+    """Search the web (ONLY this agent may), condense to notes."""
+    # TODO:
+    # 1. results = search_tool.invoke({"query": state["task"]})["results"]
+    # 2. Format results into a raw text block (title, content, url)
+    # 3. notes = run_persona("researcher", f"Task ...\n\nSearch results:\n{raw}")
+    # 4. return {"research_notes": [notes], "execution_logs": [...]}
+    #    ^ note the LIST — research_notes is append-only!
+    pass
+
+
+def analyst_node(state: TeamState):
+    """Turn raw notes into analysis."""
+    # TODO: run_persona("analyst", ...) → {"analysis": ..., "execution_logs": [...]}
+    pass
+
+
+def writer_node(state: TeamState):
+    """Write the draft — or REVISE it if a critique is present."""
+    # TODO:
+    # 1. revising = critique exists and starts with "REVISE"
+    # 2. Build the prompt; when revising, include the previous draft
+    #    AND the critique so the writer knows what to fix.
+    # 3. return {"draft": ...,
+    #            "critique": "",   <- WHY reset this? (see self-check)
+    #            "revision_count": +1 only when revising,
+    #            "execution_logs": [...]}
+    pass
+
+
+def critic_node(state: TeamState):
+    """Review the draft against the research notes."""
+    # TODO: run_persona("critic", ...) → the persona replies either
+    # "APPROVED" or "REVISE: <fixes>". Store it in critique.
+    pass
+
+# TODO: route_from_supervisor + graph wiring
+
+initial_state = {
+    "task": "Should our company adopt multi-agent AI systems in 2026?",
+    "research_notes": [],
+    "analysis": "",
+    "draft": "",
+    "critique": "",
+    "revision_count": 0,
+    "turn_count": 0,
+    "next_agent": "",
+    "execution_logs": [],
+}
+# TODO: compile, visualize, stream, print final draft + stats
