@@ -37,6 +37,34 @@ async def create_response(req: ResponseRequest):
         ],
     }
 
+import os
+
 @app.get("/.well-known/agent-card.json")
 def agent_card():
-    return {"todo": True}
+    student = os.getenv("STUDENT_NAME", "faisal")
+    public_url = os.getenv("PUBLIC_URL", "http://localhost:8000")
+    return {
+        "protocolVersion": "1.0",
+        "name": f"{student}-agent",
+        "description": "A research and analysis agent that produces structured research briefs and Conventional Commits-style commit messages.",
+        "url": f"{public_url}/v1/responses",
+        "version": "0.1.0",
+        "capabilities": {"streaming": False},
+        "defaultInputModes": ["text/plain"],
+        "defaultOutputModes": ["text/plain"],
+        "skills": [
+            {
+                "id": "research-brief",
+                "name": "Research Brief",
+                "description": "Write a one-page executive research brief on a technical topic.",
+                "tags": ["research", "writing"],
+            },
+            {
+                "id": "commit-message",
+                "name": "Commit Message",
+                "description": "Write a Conventional Commits-style commit message from a description of a code change.",
+                "tags": ["git", "dev-tools"],
+            },
+        ],
+    }
+
